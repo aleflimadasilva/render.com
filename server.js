@@ -3,33 +3,37 @@ const mqtt = require('mqtt');
 const cors = require('cors');
 
 const app = express();
-
-// CORS - Permite qualquer origem (para teste)
-app.use(cors({
-    origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
+app.use(cors());
 app.use(express.json());
 
-// ═══════════════════════════════════════════════════════════════
-// CONFIGURAÇÃO MQTT - EMQX Cloud
-// ═══════════════════════════════════════════════════════════════
+// Configuração EMQX
 const MQTT_BROKER = "k3f3a610.ala.us-east-1.emqxsl.com";
 const MQTT_PORT = 8883;
 const MQTT_USER = "alef";
 const MQTT_PASS = "@Alef123";
 
-console.log(`📡 Conectando ao MQTT: ${MQTT_BROKER}:${MQTT_PORT}`);
-
-// Conexão MQTT
+// Conecta MQTT
 const client = mqtt.connect(`mqtts://${MQTT_BROKER}:${MQTT_PORT}`, {
     username: MQTT_USER,
     password: MQTT_PASS,
     rejectUnauthorized: false
 });
 
+// ═══════════════════════════════════════════════════════════════
+// ESTRUTURA DE HISTÓRICO POR CÔMODO
+// ═══════════════════════════════════════════════════════════════
+let historicoGeral = [];      // Temperatura geral (DS18B20)
+let historicoSala = [];       // Temperatura e Umidade da Sala
+let historicoQuarto = [];     // Temperatura e Umidade do Quarto
+let historicoBanheiro = [];   // Temperatura do Banheiro (se tiver)
+let historicoCozinha = [];    // Temperatura da Cozinha (se tiver)
+
+// Limite de registros por histórico (mantém últimos 500)
+const MAX_HISTORICO = 500;
+
+// ═══════════════════════════════════════════════════════════════
+// VARIÁVEIS DE STATUS
+// ═══════════════════════════════════════════════════════════════
 let ultimaTemperatura = null;
 let statusDispositivos = {
     sala: "OFF",
@@ -38,41 +42,134 @@ let statusDispositivos = {
     cozinha: "OFF"
 };
 
-client.on("connect", () => {
-    console.log("✅ Conectado ao EMQX Cloud!");
+// Dados dos sensores DHT11
+let dadosSala = {
+    temperatura: null,
+    umidade: null,
+    ultimaAtualizacao: null
+};
+
+let dadosQuarto = {
+    temperatura: null,
+    umidade: null,
+    ultimaAtualizacao: null
+};
+
+// ═══════════════════════════════════════════════════════════════
+// FUNÇÃO PARA ADICIONAR AO HISTÓRICO
+// ═══════════════════════════════════════════════════════════════
+function adicionarAoHistorico(historicoArray, dados) {
+    const registro = {
+        data: new Date().toLocaleDateString('pt-BR'),
+        hora: new Date().toLocaleTimeString('pt-BR'),
+        timestamp: new Date().toISOString(),
+        ...dados
+    };
     
+    historicoArray.unshift(registro); // Adiciona no início
+    
+    // Mantém apenas os últimos MAX_HISTORICO registros
+    if (historicoArray.length > MAX_HISTORICO) {
+        historicoArray.pop();
+    }
+    
+    return registro;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MQTT CALLBACKS
+// ═══════════════════════════════════════════════════════════════
+client.on("connect", () => {
+    console.log("✅ Conectado ao EMQX!");
     client.subscribe([
         "alefsilva/temperatura",
         "alefsilva/sala/status",
         "alefsilva/quarto/status",
         "alefsilva/banheiro/status",
-        "alefsilva/cozinha/status"
-    ], (err) => {
-        if (err) {
-            console.error("❌ Erro ao inscrever:", err);
-        } else {
-            console.log("✅ Inscrito nos tópicos!");
-        }
-    });
-});
-
-client.on("error", (err) => {
-    console.error("❌ Erro MQTT:", err);
+        "alefsilva/cozinha/status",
+        "alefsilva/sala/temperatura",
+        "alefsilva/sala/umidade",
+        "alefsilva/quarto/temperatura",
+        "alefsilva/quarto/umidade"
+    ]);
 });
 
 client.on("message", (topic, message) => {
     const msg = message.toString();
-    console.log(`📨 MQTT: ${topic} = ${msg}`);
     
+    // Temperatura geral (DS18B20)
     if (topic === "alefsilva/temperatura") {
         ultimaTemperatura = parseFloat(msg);
-        console.log(`🌡️ Temperatura: ${ultimaTemperatura}°C`);
+        console.log(`🌡️ Temp Geral: ${ultimaTemperatura}°C`);
+        
+        adicionarAoHistorico(historicoGeral, {
+            tipo: "Temperatura Geral",
+            temperatura: ultimaTemperatura
+        });
     }
     
+    // Status das luzes
     if (topic.includes("/status")) {
         const local = topic.split("/")[1];
         statusDispositivos[local] = msg;
         console.log(`💡 ${local}: ${msg === "ON" ? "LIGADO" : "DESLIGADO"}`);
+    }
+    
+    // DHT11 da Sala
+    if (topic === "alefsilva/sala/temperatura") {
+        dadosSala.temperatura = parseFloat(msg);
+        dadosSala.ultimaAtualizacao = new Date().toISOString();
+        console.log(`🌡️ Sala Temp: ${dadosSala.temperatura}°C`);
+        
+        // Só adiciona ao histórico se já tiver umidade (evita registro incompleto)
+        if (dadosSala.umidade !== null) {
+            adicionarAoHistorico(historicoSala, {
+                local: "Sala",
+                temperatura: dadosSala.temperatura,
+                umidade: dadosSala.umidade
+            });
+        }
+    }
+    
+    if (topic === "alefsilva/sala/umidade") {
+        dadosSala.umidade = parseFloat(msg);
+        console.log(`💧 Sala Umid: ${dadosSala.umidade}%`);
+        
+        if (dadosSala.temperatura !== null) {
+            adicionarAoHistorico(historicoSala, {
+                local: "Sala",
+                temperatura: dadosSala.temperatura,
+                umidade: dadosSala.umidade
+            });
+        }
+    }
+    
+    // DHT11 do Quarto
+    if (topic === "alefsilva/quarto/temperatura") {
+        dadosQuarto.temperatura = parseFloat(msg);
+        dadosQuarto.ultimaAtualizacao = new Date().toISOString();
+        console.log(`🌡️ Quarto Temp: ${dadosQuarto.temperatura}°C`);
+        
+        if (dadosQuarto.umidade !== null) {
+            adicionarAoHistorico(historicoQuarto, {
+                local: "Quarto",
+                temperatura: dadosQuarto.temperatura,
+                umidade: dadosQuarto.umidade
+            });
+        }
+    }
+    
+    if (topic === "alefsilva/quarto/umidade") {
+        dadosQuarto.umidade = parseFloat(msg);
+        console.log(`💧 Quarto Umid: ${dadosQuarto.umidade}%`);
+        
+        if (dadosQuarto.temperatura !== null) {
+            adicionarAoHistorico(historicoQuarto, {
+                local: "Quarto",
+                temperatura: dadosQuarto.temperatura,
+                umidade: dadosQuarto.umidade
+            });
+        }
     }
 });
 
@@ -80,79 +177,140 @@ client.on("message", (topic, message) => {
 // ENDPOINTS DA API
 // ═══════════════════════════════════════════════════════════════
 
-// Rota de saúde (health check)
+// Saúde do servidor
 app.get("/api/health", (req, res) => {
-    res.json({
-        status: "online",
-        mqtt: client.connected ? "conectado" : "desconectado",
-        timestamp: new Date().toISOString()
-    });
+    res.json({ status: "ok", mqtt: client.connected });
 });
 
-// GET /api/dados
+// Dados atuais
 app.get("/api/dados", (req, res) => {
     res.json({
         temperatura: ultimaTemperatura,
         dispositivos: statusDispositivos,
-        mqttConectado: client.connected
+        sala: dadosSala,
+        quarto: dadosQuarto,
+        timestamp: new Date().toISOString()
     });
 });
 
-// POST /api/comando
+// Enviar comando
 app.post("/api/comando", (req, res) => {
     const { dispositivo, acao } = req.body;
-    
-    console.log(`📤 Comando recebido: ${dispositivo} -> ${acao}`);
-    
-    if (!dispositivo || !acao) {
-        return res.status(400).json({ erro: "Dispositivo e ação são obrigatórios" });
-    }
-    
     const topic = `alefsilva/${dispositivo}/comando`;
     
     client.publish(topic, acao, (err) => {
-        if (err) {
-            console.error("❌ Erro ao publicar:", err);
-            res.status(500).json({ erro: err.message });
-        } else {
-            console.log(`✅ Publicado: ${topic} = ${acao}`);
-            res.json({ sucesso: true, mensagem: `Comando ${acao} enviado para ${dispositivo}` });
-        }
+        if (err) res.status(500).json({ erro: err.message });
+        else res.json({ sucesso: true });
     });
 });
 
-// Histórico
-let historico = [];
+// ═══════════════════════════════════════════════════════════════
+// ENDPOINTS DE HISTÓRICO
+// ═══════════════════════════════════════════════════════════════
 
-app.post("/api/historico", (req, res) => {
-    const { temperatura } = req.body;
-    if (temperatura !== undefined && !isNaN(temperatura)) {
-        historico.push({
-            data: new Date().toLocaleDateString(),
-            hora: new Date().toLocaleTimeString(),
-            valor: temperatura
-        });
-        if (historico.length > 100) historico.shift();
-    }
-    res.json({ sucesso: true });
+// Histórico Geral
+app.get("/api/historico/geral", (req, res) => {
+    res.json(historicoGeral);
 });
 
-app.get("/api/historico", (req, res) => {
-    res.json(historico);
+// Histórico da Sala
+app.get("/api/historico/sala", (req, res) => {
+    res.json(historicoSala);
 });
 
-// Rota raiz para teste
-app.get("/", (req, res) => {
+// Histórico do Quarto
+app.get("/api/historico/quarto", (req, res) => {
+    res.json(historicoQuarto);
+});
+
+// Todos os históricos juntos
+app.get("/api/historico/todos", (req, res) => {
     res.json({
-        nome: "IoT Backend",
-        versao: "1.0",
-        endpoints: ["/api/health", "/api/dados", "/api/comando", "/api/historico"]
+        geral: historicoGeral,
+        sala: historicoSala,
+        quarto: historicoQuarto
     });
 });
 
-// Inicia o servidor
+// ═══════════════════════════════════════════════════════════════
+// EXPORTAR PARA EXCEL (Formato CSV que o Excel abre)
+// ═══════════════════════════════════════════════════════════════
+app.get("/api/exportar/excel/:comodo", (req, res) => {
+    const { comodo } = req.params;
+    let dados = [];
+    let nomeArquivo = "";
+    let cabecalho = "";
+    
+    switch(comodo) {
+        case "geral":
+            dados = historicoGeral;
+            nomeArquivo = "historico_temperatura_geral";
+            cabecalho = "Data,Hora,Temperatura (°C)\n";
+            break;
+        case "sala":
+            dados = historicoSala;
+            nomeArquivo = "historico_sala_temp_umidade";
+            cabecalho = "Data,Hora,Temperatura Sala (°C),Umidade Sala (%)\n";
+            break;
+        case "quarto":
+            dados = historicoQuarto;
+            nomeArquivo = "historico_quarto_temp_umidade";
+            cabecalho = "Data,Hora,Temperatura Quarto (°C),Umidade Quarto (%)\n";
+            break;
+        case "todos":
+            // Cria um resumo com todos os dados
+            const maxLen = Math.max(historicoGeral.length, historicoSala.length, historicoQuarto.length);
+            let linhas = [];
+            for (let i = 0; i < maxLen; i++) {
+                const g = historicoGeral[i] || {};
+                const s = historicoSala[i] || {};
+                const q = historicoQuarto[i] || {};
+                linhas.push(`${g.data || ''},${g.hora || ''},${g.temperatura || ''},${s.data || ''},${s.hora || ''},${s.temperatura || ''},${s.umidade || ''},${q.data || ''},${q.hora || ''},${q.temperatura || ''},${q.umidade || ''}`);
+            }
+            cabecalho = "Data Geral,Hora Geral,Temp Geral (°C),Data Sala,Hora Sala,Temp Sala (°C),Umid Sala (%),Data Quarto,Hora Quarto,Temp Quarto (°C),Umid Quarto (%)\n";
+            nomeArquivo = "historico_completo_todos_comodos";
+            
+            res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+            res.setHeader('Content-Disposition', `attachment; filename=${nomeArquivo}.csv`);
+            res.write('\uFEFF' + cabecalho); // BOM para UTF-8
+            res.write(linhas.join('\n'));
+            return res.end();
+    }
+    
+    // Converte para CSV
+    let linhas = [];
+    for (const item of dados) {
+        if (comodo === "sala" || comodo === "quarto") {
+            linhas.push(`${item.data},${item.hora},${item.temperatura},${item.umidade}`);
+        } else {
+            linhas.push(`${item.data},${item.hora},${item.temperatura}`);
+        }
+    }
+    
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=${nomeArquivo}.csv`);
+    res.write('\uFEFF' + cabecalho); // BOM para UTF-8
+    res.write(linhas.join('\n'));
+    res.end();
+});
+
+// Rota principal
+app.get("/", (req, res) => {
+    res.json({ 
+        message: "IoT Backend Rodando!",
+        endpoints: [
+            "/api/health",
+            "/api/dados",
+            "/api/comando",
+            "/api/historico/geral",
+            "/api/historico/sala",
+            "/api/historico/quarto",
+            "/api/exportar/excel/:comodo"
+        ]
+    });
+});
+
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Servidor rodando na porta ${PORT}`);
-    console.log(`📡 Teste: https://iot-backend-3nqz.onrender.com/api/health`);
+app.listen(PORT, () => {
+    console.log(`🚀 Servidor na porta ${PORT}`);
 });
