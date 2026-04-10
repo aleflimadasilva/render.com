@@ -32,14 +32,15 @@ let historicoCozinha = [];    // Temperatura da Cozinha (se tiver)
 const MAX_HISTORICO = 500;
 
 // ═══════════════════════════════════════════════════════════════
-// VARIÁVEIS DE STATUS
+// VARIÁVEIS DE STATUS (INICIALIZADAS CORRETAMENTE)
 // ═══════════════════════════════════════════════════════════════
 let ultimaTemperatura = null;
 let statusDispositivos = {
     sala: "OFF",
     quarto: "OFF",
     banheiro: "OFF",
-    cozinha: "OFF"
+    cozinha: "OFF",
+    QUARTINHO: "OFF"  // ADICIONADO
 };
 
 // Dados dos sensores DHT11
@@ -54,6 +55,33 @@ let dadosQuarto = {
     umidade: null,
     ultimaAtualizacao: null
 };
+
+// ═══════════════════════════════════════════════════════════════
+// FUNÇÃO PARA ATUALIZAR STATUS E PUBLICAR MQTT
+// ═══════════════════════════════════════════════════════════════
+function atualizarStatusDispositivo(dispositivo, estado) {
+    // Atualiza o status local
+    statusDispositivos[dispositivo] = estado;
+    console.log(`💡 ${dispositivo}: ${estado === "ON" ? "LIGADO" : "DESLIGADO"}`);
+    
+    // Publica no MQTT para o dispositivo físico
+    const topic = `alefsilva/${dispositivo}/comando`;
+    client.publish(topic, estado, (err) => {
+        if (err) {
+            console.error(`❌ Erro ao publicar ${dispositivo}:`, err.message);
+        } else {
+            console.log(`✅ Comando ${estado} publicado para ${dispositivo}`);
+        }
+    });
+    
+    // Também publica o status no tópico de status (para manter sincronia)
+    const statusTopic = `alefsilva/${dispositivo}/status`;
+    client.publish(statusTopic, estado, (err) => {
+        if (err) {
+            console.error(`❌ Erro ao publicar status ${dispositivo}:`, err.message);
+        }
+    });
+}
 
 // ═══════════════════════════════════════════════════════════════
 // FUNÇÃO PARA ADICIONAR AO HISTÓRICO
@@ -87,6 +115,7 @@ client.on("connect", () => {
         "alefsilva/quarto/status",
         "alefsilva/banheiro/status",
         "alefsilva/cozinha/status",
+        "alefsilva/QUARTINHO/status",
         "alefsilva/sala/temperatura",
         "alefsilva/sala/umidade",
         "alefsilva/quarto/temperatura",
@@ -108,11 +137,14 @@ client.on("message", (topic, message) => {
         });
     }
     
-    // Status das luzes
+    // Status das luzes (vindo do ESP32)
     if (topic.includes("/status")) {
-        const local = topic.split("/")[1];
-        statusDispositivos[local] = msg;
-        console.log(`💡 ${local}: ${msg === "ON" ? "LIGADO" : "DESLIGADO"}`);
+        const parts = topic.split("/");
+        const local = parts[1];
+        if (statusDispositivos.hasOwnProperty(local)) {
+            statusDispositivos[local] = msg;
+            console.log(`📡 Status recebido do ${local}: ${msg === "ON" ? "LIGADO" : "DESLIGADO"}`);
+        }
     }
     
     // DHT11 da Sala
@@ -121,7 +153,6 @@ client.on("message", (topic, message) => {
         dadosSala.ultimaAtualizacao = new Date().toISOString();
         console.log(`🌡️ Sala Temp: ${dadosSala.temperatura}°C`);
         
-        // Só adiciona ao histórico se já tiver umidade (evita registro incompleto)
         if (dadosSala.umidade !== null) {
             adicionarAoHistorico(historicoSala, {
                 local: "Sala",
@@ -173,13 +204,29 @@ client.on("message", (topic, message) => {
     }
 });
 
+client.on("error", (err) => {
+    console.error("❌ Erro MQTT:", err);
+});
+
+client.on("offline", () => {
+    console.warn("⚠️ Cliente MQTT offline");
+});
+
+client.on("reconnect", () => {
+    console.log("🔄 Tentando reconectar ao MQTT...");
+});
+
 // ═══════════════════════════════════════════════════════════════
 // ENDPOINTS DA API
 // ═══════════════════════════════════════════════════════════════
 
 // Saúde do servidor
 app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", mqtt: client.connected });
+    res.json({ 
+        status: "ok", 
+        mqtt: client.connected,
+        dispositivos: statusDispositivos
+    });
 });
 
 // Dados atuais
@@ -189,18 +236,75 @@ app.get("/api/dados", (req, res) => {
         dispositivos: statusDispositivos,
         sala: dadosSala,
         quarto: dadosQuarto,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        mqttConnected: client.connected
     });
 });
 
-// Enviar comando
+// Enviar comando (CORRIGIDO - atualiza status imediatamente)
 app.post("/api/comando", (req, res) => {
     const { dispositivo, acao } = req.body;
-    const topic = `alefsilva/${dispositivo}/comando`;
     
+    console.log(`📨 Comando recebido: ${dispositivo} -> ${acao}`);
+    
+    // Verifica se o dispositivo existe
+    if (!statusDispositivos.hasOwnProperty(dispositivo)) {
+        return res.status(400).json({ erro: `Dispositivo "${dispositivo}" não encontrado` });
+    }
+    
+    // Atualiza o status local IMEDIATAMENTE
+    statusDispositivos[dispositivo] = acao;
+    console.log(`💡 Status atualizado: ${dispositivo} = ${acao}`);
+    
+    // Publica no MQTT
+    const topic = `alefsilva/${dispositivo}/comando`;
     client.publish(topic, acao, (err) => {
-        if (err) res.status(500).json({ erro: err.message });
-        else res.json({ sucesso: true });
+        if (err) {
+            console.error(`❌ Erro MQTT ao enviar para ${dispositivo}:`, err.message);
+            // Não reverte o status local para não confundir o usuário
+            return res.status(500).json({ 
+                erro: "Falha na comunicação MQTT", 
+                detalhe: err.message,
+                statusLocal: statusDispositivos[dispositivo]
+            });
+        }
+        
+        console.log(`✅ Comando ${acao} enviado via MQTT para ${dispositivo}`);
+        
+        // Também publica no tópico de status para manter sincronia
+        const statusTopic = `alefsilva/${dispositivo}/status`;
+        client.publish(statusTopic, acao);
+        
+        res.json({ 
+            sucesso: true, 
+            dispositivo, 
+            acao,
+            statusAtual: statusDispositivos[dispositivo]
+        });
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ENDPOINT PARA SIMULAR COMANDO (QUANDO MQTT ESTÁ OFFLINE)
+// ═══════════════════════════════════════════════════════════════
+app.post("/api/comando/simular", (req, res) => {
+    const { dispositivo, acao } = req.body;
+    
+    if (!statusDispositivos.hasOwnProperty(dispositivo)) {
+        return res.status(400).json({ erro: `Dispositivo "${dispositivo}" não encontrado` });
+    }
+    
+    // Atualiza apenas localmente (modo demonstração)
+    statusDispositivos[dispositivo] = acao;
+    console.log(`🔄 SIMULAÇÃO: ${dispositivo} -> ${acao} (apenas local)`);
+    
+    res.json({ 
+        sucesso: true, 
+        simulacao: true,
+        dispositivo, 
+        acao,
+        statusAtual: statusDispositivos[dispositivo],
+        aviso: "Modo simulação - dispositivo físico não foi alterado"
     });
 });
 
@@ -258,7 +362,6 @@ app.get("/api/exportar/excel/:comodo", (req, res) => {
             cabecalho = "Data,Hora,Temperatura Quarto (°C),Umidade Quarto (%)\n";
             break;
         case "todos":
-            // Cria um resumo com todos os dados
             const maxLen = Math.max(historicoGeral.length, historicoSala.length, historicoQuarto.length);
             let linhas = [];
             for (let i = 0; i < maxLen; i++) {
@@ -272,12 +375,11 @@ app.get("/api/exportar/excel/:comodo", (req, res) => {
             
             res.setHeader('Content-Type', 'text/csv; charset=utf-8');
             res.setHeader('Content-Disposition', `attachment; filename=${nomeArquivo}.csv`);
-            res.write('\uFEFF' + cabecalho); // BOM para UTF-8
+            res.write('\uFEFF' + cabecalho);
             res.write(linhas.join('\n'));
             return res.end();
     }
     
-    // Converte para CSV
     let linhas = [];
     for (const item of dados) {
         if (comodo === "sala" || comodo === "quarto") {
@@ -289,28 +391,61 @@ app.get("/api/exportar/excel/:comodo", (req, res) => {
     
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename=${nomeArquivo}.csv`);
-    res.write('\uFEFF' + cabecalho); // BOM para UTF-8
+    res.write('\uFEFF' + cabecalho);
     res.write(linhas.join('\n'));
     res.end();
+});
+
+// Reset do histórico (opcional - útil para testes)
+app.post("/api/historico/reset", (req, res) => {
+    const { comodo } = req.body;
+    
+    switch(comodo) {
+        case "geral":
+            historicoGeral = [];
+            break;
+        case "sala":
+            historicoSala = [];
+            break;
+        case "quarto":
+            historicoQuarto = [];
+            break;
+        case "todos":
+            historicoGeral = [];
+            historicoSala = [];
+            historicoQuarto = [];
+            break;
+        default:
+            return res.status(400).json({ erro: "Cômodo inválido" });
+    }
+    
+    res.json({ sucesso: true, comodo: comodo || "todos", mensagem: "Histórico resetado" });
 });
 
 // Rota principal
 app.get("/", (req, res) => {
     res.json({ 
         message: "IoT Backend Rodando!",
+        status: {
+            mqtt: client.connected ? "conectado" : "desconectado",
+            dispositivos: statusDispositivos
+        },
         endpoints: [
             "/api/health",
             "/api/dados",
             "/api/comando",
+            "/api/comando/simular",
             "/api/historico/geral",
             "/api/historico/sala",
             "/api/historico/quarto",
-            "/api/exportar/excel/:comodo"
+            "/api/exportar/excel/:comodo",
+            "/api/historico/reset"
         ]
     });
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-    console.log(`🚀 Servidor na porta ${PORT}`);
+    console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    console.log(`📡 Status MQTT: ${client.connected ? "Conectado" : "Conectando..."}`);
 });
