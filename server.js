@@ -1,18 +1,30 @@
 const express = require('express');
 const mqtt = require('mqtt');
 const cors = require('cors');
+const mongoose = require('mongoose');
+const { HistoricoGeral, HistoricoSala, HistoricoQuarto } = require('./models/Historico');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Configuração EMQX
+// ============================================================
+// CONFIGURAÇÃO DO MONGODB (use suas credenciais)
+// ============================================================
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://seu_usuario:sua_senha@cluster0.xxxxx.mongodb.net/iot?retryWrites=true&w=majority";
+
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log('✅ Conectado ao MongoDB Atlas'))
+  .catch(err => console.error('❌ Erro ao conectar MongoDB:', err));
+
+// ============================================================
+// CONFIGURAÇÃO MQTT (EMQX)
+// ============================================================
 const MQTT_BROKER = "k3f3a610.ala.us-east-1.emqxsl.com";
 const MQTT_PORT = 8883;
 const MQTT_USER = "alef";
 const MQTT_PASS = "@Alef123";
 
-// Conecta MQTT (sem bloquear o funcionamento)
 let client = null;
 let mqttConnected = false;
 
@@ -51,28 +63,17 @@ function conectarMQTT() {
             console.warn("⚠️ MQTT offline");
             mqttConnected = false;
         });
-        
     } catch (err) {
         console.error("❌ Falha ao conectar MQTT:", err.message);
         mqttConnected = false;
     }
 }
 
-// Tenta conectar (mas não impede o servidor de rodar)
 conectarMQTT();
 
-// ═══════════════════════════════════════════════════════════════
-// ESTRUTURA DE HISTÓRICO
-// ═══════════════════════════════════════════════════════════════
-let historicoGeral = [];
-let historicoSala = [];
-let historicoQuarto = [];
-
-const MAX_HISTORICO = 500;
-
-// ═══════════════════════════════════════════════════════════════
-// VARIÁVEIS DE STATUS (TUDO INICIA DESLIGADO)
-// ═══════════════════════════════════════════════════════════════
+// ============================================================
+// VARIÁVEIS DE STATUS (em memória – para respostas rápidas)
+// ============================================================
 let ultimaTemperatura = null;
 let statusDispositivos = {
     sala: "OFF",
@@ -81,58 +82,74 @@ let statusDispositivos = {
     cozinha: "OFF",
     QUARTINHO: "OFF"
 };
-
 let dadosSala = { temperatura: null, umidade: null };
 let dadosQuarto = { temperatura: null, umidade: null };
 
-// ═══════════════════════════════════════════════════════════════
-// FUNÇÃO PARA ATUALIZAR STATUS (SEMPRE ATUALIZA LOCALMENTE)
-// ═══════════════════════════════════════════════════════════════
-function atualizarStatusDispositivo(dispositivo, estado) {
-    // SEMPRE atualiza o status local primeiro
-    statusDispositivos[dispositivo] = estado;
-    console.log(`💡 ${dispositivo}: ${estado === "ON" ? "LIGADO ✅" : "DESLIGADO ❌"}`);
-    
-    // Tenta enviar via MQTT (mas não falha se não conseguir)
-    if (client && mqttConnected) {
-        const topic = `alefsilva/${dispositivo}/comando`;
-        client.publish(topic, estado, (err) => {
-            if (err) {
-                console.log(`⚠️ MQTT falhou para ${dispositivo}, mas status local mantido`);
-            } else {
-                console.log(`📡 MQTT: ${estado} enviado para ${dispositivo}`);
-            }
+// ============================================================
+// FUNÇÕES PARA SALVAR NO BANCO (assíncronas)
+// ============================================================
+async function salvarHistoricoGeral(temperatura) {
+    try {
+        const now = new Date();
+        const registro = new HistoricoGeral({
+            data: now.toLocaleDateString('pt-BR'),
+            hora: now.toLocaleTimeString('pt-BR'),
+            temperatura: temperatura
         });
-    } else {
-        console.log(`⚠️ MQTT desconectado - status apenas local para ${dispositivo}`);
+        await registro.save();
+        console.log(`📝 Histórico geral salvo: ${temperatura}°C`);
+    } catch (err) {
+        console.error("Erro ao salvar histórico geral:", err);
     }
 }
 
-function adicionarAoHistorico(historicoArray, dados) {
-    const registro = {
-        data: new Date().toLocaleDateString('pt-BR'),
-        hora: new Date().toLocaleTimeString('pt-BR'),
-        timestamp: new Date().toISOString(),
-        ...dados
-    };
-    historicoArray.unshift(registro);
-    if (historicoArray.length > MAX_HISTORICO) historicoArray.pop();
-    return registro;
+async function salvarHistoricoSala(temp, umid) {
+    try {
+        const now = new Date();
+        const registro = new HistoricoSala({
+            data: now.toLocaleDateString('pt-BR'),
+            hora: now.toLocaleTimeString('pt-BR'),
+            temperatura: temp,
+            umidade: umid
+        });
+        await registro.save();
+        console.log(`📝 Histórico sala salvo: ${temp}°C, ${umid}%`);
+    } catch (err) {
+        console.error("Erro ao salvar histórico sala:", err);
+    }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// MQTT CALLBACKS (para receber dados dos sensores)
-// ═══════════════════════════════════════════════════════════════
+async function salvarHistoricoQuarto(temp, umid) {
+    try {
+        const now = new Date();
+        const registro = new HistoricoQuarto({
+            data: now.toLocaleDateString('pt-BR'),
+            hora: now.toLocaleTimeString('pt-BR'),
+            temperatura: temp,
+            umidade: umid
+        });
+        await registro.save();
+        console.log(`📝 Histórico quarto salvo: ${temp}°C, ${umid}%`);
+    } catch (err) {
+        console.error("Erro ao salvar histórico quarto:", err);
+    }
+}
+
+// ============================================================
+// CALLBACK MQTT – processa mensagens e salva no banco
+// ============================================================
 if (client) {
-    client.on("message", (topic, message) => {
+    client.on("message", async (topic, message) => {
         const msg = message.toString();
         
+        // Temperatura geral (DS18B20)
         if (topic === "alefsilva/temperatura") {
             ultimaTemperatura = parseFloat(msg);
             console.log(`🌡️ Temp Geral: ${ultimaTemperatura}°C`);
-            adicionarAoHistorico(historicoGeral, { temperatura: ultimaTemperatura });
+            await salvarHistoricoGeral(ultimaTemperatura);
         }
         
+        // Status dos dispositivos
         if (topic.includes("/status")) {
             const local = topic.split("/")[1];
             if (statusDispositivos.hasOwnProperty(local)) {
@@ -141,48 +158,41 @@ if (client) {
             }
         }
         
+        // Dados da Sala (DHT11)
         if (topic === "alefsilva/sala/temperatura") {
             dadosSala.temperatura = parseFloat(msg);
             if (dadosSala.umidade !== null) {
-                adicionarAoHistorico(historicoSala, { temperatura: dadosSala.temperatura, umidade: dadosSala.umidade });
+                await salvarHistoricoSala(dadosSala.temperatura, dadosSala.umidade);
             }
         }
-        
         if (topic === "alefsilva/sala/umidade") {
             dadosSala.umidade = parseFloat(msg);
             if (dadosSala.temperatura !== null) {
-                adicionarAoHistorico(historicoSala, { temperatura: dadosSala.temperatura, umidade: dadosSala.umidade });
+                await salvarHistoricoSala(dadosSala.temperatura, dadosSala.umidade);
             }
         }
         
+        // Dados do Quarto (DHT11)
         if (topic === "alefsilva/quarto/temperatura") {
             dadosQuarto.temperatura = parseFloat(msg);
             if (dadosQuarto.umidade !== null) {
-                adicionarAoHistorico(historicoQuarto, { temperatura: dadosQuarto.temperatura, umidade: dadosQuarto.umidade });
+                await salvarHistoricoQuarto(dadosQuarto.temperatura, dadosQuarto.umidade);
             }
         }
-        
         if (topic === "alefsilva/quarto/umidade") {
             dadosQuarto.umidade = parseFloat(msg);
             if (dadosQuarto.temperatura !== null) {
-                adicionarAoHistorico(historicoQuarto, { temperatura: dadosQuarto.temperatura, umidade: dadosQuarto.umidade });
+                await salvarHistoricoQuarto(dadosQuarto.temperatura, dadosQuarto.umidade);
             }
         }
     });
 }
 
-// ═══════════════════════════════════════════════════════════════
+// ============================================================
 // ENDPOINTS DA API
-// ═══════════════════════════════════════════════════════════════
+// ============================================================
 
-app.get("/api/health", (req, res) => {
-    res.json({ 
-        status: "ok", 
-        mqtt: mqttConnected,
-        dispositivos: statusDispositivos
-    });
-});
-
+// Retorna dados atuais (rápido, da memória)
 app.get("/api/dados", (req, res) => {
     res.json({
         temperatura: ultimaTemperatura,
@@ -193,89 +203,100 @@ app.get("/api/dados", (req, res) => {
     });
 });
 
-// ENDPOINT DE COMANDO PRINCIPAL - SEMPRE FUNCIONA
+// Endpoint para enviar comandos MQTT (liga/desliga lâmpadas)
 app.post("/api/comando", (req, res) => {
     const { dispositivo, acao } = req.body;
-    
-    console.log(`📨 Comando recebido: ${dispositivo} -> ${acao}`);
-    
     if (!statusDispositivos.hasOwnProperty(dispositivo)) {
-        return res.status(400).json({ erro: `Dispositivo "${dispositivo}" não encontrado` });
+        return res.status(400).json({ erro: "Dispositivo inválido" });
     }
-    
-    // ATUALIZA O STATUS LOCAL IMEDIATAMENTE (a lâmpada vai acender na interface)
-    atualizarStatusDispositivo(dispositivo, acao);
-    
-    // Retorna sucesso imediato (a interface já está atualizada)
-    res.json({ 
-        sucesso: true, 
-        dispositivo, 
-        acao,
-        statusAtual: statusDispositivos[dispositivo],
-        mqttEnviado: mqttConnected
-    });
+    // Atualiza status local
+    statusDispositivos[dispositivo] = acao;
+    // Publica no MQTT
+    if (client && mqttConnected) {
+        client.publish(`alefsilva/${dispositivo}/comando`, acao);
+    }
+    res.json({ sucesso: true, dispositivo, acao });
 });
 
-// Histórico
-app.get("/api/historico/geral", (req, res) => res.json(historicoGeral));
-app.get("/api/historico/sala", (req, res) => res.json(historicoSala));
-app.get("/api/historico/quarto", (req, res) => res.json(historicoQuarto));
+// Endpoints de histórico (buscando do MongoDB)
+app.get("/api/historico/geral", async (req, res) => {
+    try {
+        const historico = await HistoricoGeral.find().sort({ timestamp: -1 }).limit(500);
+        res.json(historico);
+    } catch (err) {
+        res.status(500).json({ erro: err.message });
+    }
+});
 
-// Exportar Excel
-app.get("/api/exportar/excel/:comodo", (req, res) => {
+app.get("/api/historico/sala", async (req, res) => {
+    try {
+        const historico = await HistoricoSala.find().sort({ timestamp: -1 }).limit(500);
+        res.json(historico);
+    } catch (err) {
+        res.status(500).json({ erro: err.message });
+    }
+});
+
+app.get("/api/historico/quarto", async (req, res) => {
+    try {
+        const historico = await HistoricoQuarto.find().sort({ timestamp: -1 }).limit(500);
+        res.json(historico);
+    } catch (err) {
+        res.status(500).json({ erro: err.message });
+    }
+});
+
+// Exportar Excel (agora busca do banco)
+app.get("/api/exportar/excel/:comodo", async (req, res) => {
     const { comodo } = req.params;
     let dados = [];
     let cabecalho = "";
     
-    switch(comodo) {
-        case "geral":
-            dados = historicoGeral;
-            cabecalho = "Data,Hora,Temperatura (°C)\n";
-            break;
-        case "sala":
-            dados = historicoSala;
-            cabecalho = "Data,Hora,Temperatura Sala (°C),Umidade Sala (%)\n";
-            break;
-        case "quarto":
-            dados = historicoQuarto;
-            cabecalho = "Data,Hora,Temperatura Quarto (°C),Umidade Quarto (%)\n";
-            break;
-        default:
-            return res.status(400).json({ erro: "Cômodo inválido" });
-    }
-    
-    let linhas = dados.map(item => {
-        if (comodo === "sala" || comodo === "quarto") {
-            return `${item.data},${item.hora},${item.temperatura || ''},${item.umidade || ''}`;
+    try {
+        switch(comodo) {
+            case "geral":
+                dados = await HistoricoGeral.find().sort({ timestamp: -1 });
+                cabecalho = "Data,Hora,Temperatura (°C)\n";
+                break;
+            case "sala":
+                dados = await HistoricoSala.find().sort({ timestamp: -1 });
+                cabecalho = "Data,Hora,Temperatura Sala (°C),Umidade Sala (%)\n";
+                break;
+            case "quarto":
+                dados = await HistoricoQuarto.find().sort({ timestamp: -1 });
+                cabecalho = "Data,Hora,Temperatura Quarto (°C),Umidade Quarto (%)\n";
+                break;
+            default:
+                return res.status(400).json({ erro: "Cômodo inválido" });
         }
-        return `${item.data},${item.hora},${item.temperatura || ''}`;
-    });
-    
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename=historico_${comodo}.csv`);
-    res.write('\uFEFF' + cabecalho);
-    res.write(linhas.join('\n'));
-    res.end();
+        
+        let linhas = dados.map(item => {
+            if (comodo === "sala" || comodo === "quarto") {
+                return `${item.data},${item.hora},${item.temperatura || ''},${item.umidade || ''}`;
+            }
+            return `${item.data},${item.hora},${item.temperatura || ''}`;
+        });
+        
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename=historico_${comodo}.csv`);
+        res.write('\uFEFF' + cabecalho);
+        res.write(linhas.join('\n'));
+        res.end();
+    } catch (err) {
+        res.status(500).json({ erro: err.message });
+    }
 });
 
-// Reset (opcional)
-app.post("/api/historico/reset", (req, res) => {
-    historicoGeral = [];
-    historicoSala = [];
-    historicoQuarto = [];
-    res.json({ sucesso: true, mensagem: "Históricos resetados" });
+// Health check
+app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", mqtt: mqttConnected, db: mongoose.connection.readyState === 1 });
 });
 
 app.get("/", (req, res) => {
-    res.json({ 
-        message: "IoT Backend Rodando!",
-        dispositivos: statusDispositivos,
-        mqtt: mqttConnected ? "conectado" : "desconectado (modo local)"
-    });
+    res.json({ message: "IoT Backend com persistência MongoDB" });
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log(`🚀 Servidor rodando na porta ${PORT}`);
-    console.log(`📡 Modo: ${mqttConnected ? "MQTT Conectado" : "Apenas Local (interface funcionando)"}`);
 });
