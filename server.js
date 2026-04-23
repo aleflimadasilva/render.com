@@ -9,13 +9,17 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// CONFIGURAÇÃO DO MONGODB (use suas credenciais)
+// CONEXÃO COM MONGODB ATLAS (use a variável de ambiente)
 // ============================================================
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://seu_usuario:sua_senha@cluster0.xxxxx.mongodb.net/iot?retryWrites=true&w=majority";
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) {
+  console.error('❌ Variável MONGODB_URI não definida no Render');
+  process.exit(1);
+}
 
 mongoose.connect(MONGODB_URI)
   .then(() => console.log('✅ Conectado ao MongoDB Atlas'))
-  .catch(err => console.error('❌ Erro ao conectar MongoDB:', err));
+  .catch(err => console.error('❌ Erro MongoDB:', err));
 
 // ============================================================
 // CONFIGURAÇÃO MQTT (EMQX)
@@ -142,14 +146,12 @@ if (client) {
     client.on("message", async (topic, message) => {
         const msg = message.toString();
         
-        // Temperatura geral (DS18B20)
         if (topic === "alefsilva/temperatura") {
             ultimaTemperatura = parseFloat(msg);
             console.log(`🌡️ Temp Geral: ${ultimaTemperatura}°C`);
             await salvarHistoricoGeral(ultimaTemperatura);
         }
         
-        // Status dos dispositivos
         if (topic.includes("/status")) {
             const local = topic.split("/")[1];
             if (statusDispositivos.hasOwnProperty(local)) {
@@ -158,7 +160,6 @@ if (client) {
             }
         }
         
-        // Dados da Sala (DHT11)
         if (topic === "alefsilva/sala/temperatura") {
             dadosSala.temperatura = parseFloat(msg);
             if (dadosSala.umidade !== null) {
@@ -172,7 +173,6 @@ if (client) {
             }
         }
         
-        // Dados do Quarto (DHT11)
         if (topic === "alefsilva/quarto/temperatura") {
             dadosQuarto.temperatura = parseFloat(msg);
             if (dadosQuarto.umidade !== null) {
@@ -192,7 +192,6 @@ if (client) {
 // ENDPOINTS DA API
 // ============================================================
 
-// Retorna dados atuais (rápido, da memória)
 app.get("/api/dados", (req, res) => {
     res.json({
         temperatura: ultimaTemperatura,
@@ -203,22 +202,18 @@ app.get("/api/dados", (req, res) => {
     });
 });
 
-// Endpoint para enviar comandos MQTT (liga/desliga lâmpadas)
 app.post("/api/comando", (req, res) => {
     const { dispositivo, acao } = req.body;
     if (!statusDispositivos.hasOwnProperty(dispositivo)) {
         return res.status(400).json({ erro: "Dispositivo inválido" });
     }
-    // Atualiza status local
     statusDispositivos[dispositivo] = acao;
-    // Publica no MQTT
     if (client && mqttConnected) {
         client.publish(`alefsilva/${dispositivo}/comando`, acao);
     }
     res.json({ sucesso: true, dispositivo, acao });
 });
 
-// Endpoints de histórico (buscando do MongoDB)
 app.get("/api/historico/geral", async (req, res) => {
     try {
         const historico = await HistoricoGeral.find().sort({ timestamp: -1 }).limit(500);
@@ -246,7 +241,6 @@ app.get("/api/historico/quarto", async (req, res) => {
     }
 });
 
-// Exportar Excel (agora busca do banco)
 app.get("/api/exportar/excel/:comodo", async (req, res) => {
     const { comodo } = req.params;
     let dados = [];
@@ -287,7 +281,6 @@ app.get("/api/exportar/excel/:comodo", async (req, res) => {
     }
 });
 
-// Health check
 app.get("/api/health", (req, res) => {
     res.json({ status: "ok", mqtt: mqttConnected, db: mongoose.connection.readyState === 1 });
 });
