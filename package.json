@@ -31,16 +31,4 @@ module.exports = {
   HistoricoSala: mongoose.model('HistoricoSala', historicoSalaSchema),
   HistoricoQuarto: mongoose.model('HistoricoQuarto', historicoQuartoSchema)
 };
-{
-  "name": "iot-backend",
-  "version": "1.0.0",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "mqtt": "^5.0.0",
-    "cors": "^2.8.5"
-  }
 }
