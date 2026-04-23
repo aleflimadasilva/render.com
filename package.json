@@ -1,33 +1,10 @@
-const mongoose = require('mongoose');
-
-// Schema para histórico geral (DS18B20)
-const historicoGeralSchema = new mongoose.Schema({
-  data: String,          // "22/04/2025"
-  hora: String,          // "14:35:22"
-  temperatura: Number,
-  timestamp: { type: Date, default: Date.now }
-});
-
-// Schema para histórico da sala (DHT11)
-const historicoSalaSchema = new mongoose.Schema({
-  data: String,
-  hora: String,
-  temperatura: Number,
-  umidade: Number,
-  timestamp: { type: Date, default: Date.now }
-});
-
-// Schema para histórico do quarto (DHT11)
-const historicoQuartoSchema = new mongoose.Schema({
-  data: String,
-  hora: String,
-  temperatura: Number,
-  umidade: Number,
-  timestamp: { type: Date, default: Date.now }
-});
-
-module.exports = {
-  HistoricoGeral: mongoose.model('HistoricoGeral', historicoGeralSchema),
-  HistoricoSala: mongoose.model('HistoricoSala', historicoSalaSchema),
-  HistoricoQuarto: mongoose.model('HistoricoQuarto', historicoQuartoSchema)
-};
+{
+  "name": "iot-backend",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "^4.18.2",
+    "mqtt": "^5.0.0",
+    "cors": "^2.8.5",
+    "mongoose": "^8.0.0"
+  }
+}
