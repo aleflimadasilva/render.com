@@ -31,4 +31,3 @@ module.exports = {
   HistoricoSala: mongoose.model('HistoricoSala', historicoSalaSchema),
   HistoricoQuarto: mongoose.model('HistoricoQuarto', historicoQuartoSchema)
 };
-}
