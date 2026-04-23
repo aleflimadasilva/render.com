@@ -1,0 +1,30 @@
+const mongoose = require('mongoose');
+
+const historicoGeralSchema = new mongoose.Schema({
+  data: String,
+  hora: String,
+  temperatura: Number,
+  timestamp: { type: Date, default: Date.now }
+});
+
+const historicoSalaSchema = new mongoose.Schema({
+  data: String,
+  hora: String,
+  temperatura: Number,
+  umidade: Number,
+  timestamp: { type: Date, default: Date.now }
+});
+
+const historicoQuartoSchema = new mongoose.Schema({
+  data: String,
+  hora: String,
+  temperatura: Number,
+  umidade: Number,
+  timestamp: { type: Date, default: Date.now }
+});
+
+module.exports = {
+  HistoricoGeral: mongoose.model('HistoricoGeral', historicoGeralSchema),
+  HistoricoSala: mongoose.model('HistoricoSala', historicoSalaSchema),
+  HistoricoQuarto: mongoose.model('HistoricoQuarto', historicoQuartoSchema)
+};
